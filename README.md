@@ -11,7 +11,7 @@ python3 hw3.py
 ```
 In the code (`hw3.py`), changing the contents of `if __name__ == "__main__": ...` will change what happens.
 
-Most functions are unimportant. The main ones are:
+The functions are:
 - learn() -- runs the TD(n) algorithm, returning a robot with a policy.
 - watch_robot(r) -- takes a robot and visualizes it.
 - watch_random_policy() -- just to see what the environment is like.

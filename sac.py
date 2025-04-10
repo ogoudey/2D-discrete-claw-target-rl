@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import mode
+from scipy.stats import mode, norm
 
 import random
 from collections import defaultdict
@@ -13,36 +13,47 @@ import copy
 
 class Sim:
 
-    def __init__(self, oml=0.0, robot_position=[0,0], object_position=[5,5], map_shape=(6,6)):
+    def __init__(self, oml=0.0, robot_position=[7.0,7.0], object_position=[19.0,19.0], map_shape=(20,20)):
         self.robot_initial_position = robot_position
         self.object_initial_position = object_position
         self.map_shape = map_shape
-        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(map_shape)}
+        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "velocity":[0,0], "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(map_shape)}
         self.obj_move_likelihood = oml
         self.mem_reward = None
         
     def reset(self):
 
         #self.complete = {"robot_state":{"position":self.robot_initial_position.copy(), "grasping":False}, "object_state":{"position":self.object_initial_position.copy()}, "map":np.zeros((6,6))}
-        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(self.map_shape)}
+        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "velocity":[0,0], "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(self.map_shape)}
 #        print("(Reset)", self.complete["robot_state"]["position"])
     
     def update(self, action):
+        
         if action == "G":
             if self.complete["robot_state"]["grasping"]:
                 self.complete["robot_state"]["grasping"] = False
             else:
                 self.complete["robot_state"]["grasping"] = True
+            motion = [self.complete["robot_state"]["velocity"][0], self.complete["robot_state"]["velocity"][1]] 
+            self.complete["robot_state"]["position"][0] += motion[0]
+            self.complete["robot_state"]["position"][1] += motion[1]
         else:
-            try:
-                if self.complete["robot_state"]["position"][0] + action[0] < 0 or self.complete["robot_state"]["position"][1] + action[1] < 0:
-                    raise IndexError 
-                self.complete["map"][self.complete["robot_state"]["position"][0] + action[0], self.complete["robot_state"]["position"][1] + action[1]] = 0
-                self.complete["robot_state"]["position"][0] += action[0]
-                self.complete["robot_state"]["position"][1] += action[1]
-            except IndexError:
-                #print("Won't move that way!")
-                pass
+            self.complete["robot_state"]["velocity"][0] += action[0]
+            self.complete["robot_state"]["velocity"][1] += action[1]
+            motion = [self.complete["robot_state"]["velocity"][0], self.complete["robot_state"]["velocity"][1]]
+            
+        try:
+            if self.complete["robot_state"]["position"][0] + motion[0] < 0 or self.complete["robot_state"]["position"][1] + motion[1] < 0:
+                raise IndexError 
+            self.complete["map"][int(self.complete["robot_state"]["position"][0] + motion[0]), int(self.complete["robot_state"]["position"][1] + motion[1])] = 0
+            self.complete["robot_state"]["position"][0] += motion[0]
+            self.complete["robot_state"]["position"][1] += motion[1]
+            print("Added", motion, "to", self.complete["robot_state"]["position"])
+        except IndexError:
+            self.mem_reward = -100
+            print("Won't move that way!")
+            return
+            pass
 
         if self.complete["robot_state"]["position"] == [self.complete["object_state"]["position"][0] - 1, self.complete["object_state"]["position"][1]] and action == "G" and self.complete["robot_state"]["grasping"]:
             self.mem_reward = 100
@@ -134,12 +145,12 @@ class Viz:
         ab_object = AnnotationBbox(object_box, (object_col, object_row), frameon=False)
         ax.add_artist(ab_object)
         
-
-        if info["termination"]:
-            print(info["reward"])
-            ax.annotate("Terminated with " + str(info["reward"]), xy=(info["termination"][1], info["termination"][0]), xytext=(np.pi/2 + 1, 0.5), arrowprops=dict(color='green', arrowstyle="->"), color='green', zorder=10)
-        self.bottom_note = plt.figtext(0.5, 0.01, "Object movement likelihood: " + str(info["param"]), ha="center", fontsize=12, color='blue')
-        plt.title(info["title"])
+        if len(info.keys()) > 1:
+            if "termination" in info.keys():
+                print(info["reward"])
+                ax.annotate("Terminated with " + str(info["reward"]), xy=(info["termination"][1], info["termination"][0]), xytext=(np.pi/2 + 1, 0.5), arrowprops=dict(color='green', arrowstyle="->"), color='green', zorder=10)
+            self.bottom_note = plt.figtext(0.5, 0.01, "Object movement likelihood: " + str(info["param"]), ha="center", fontsize=12, color='blue')
+            plt.title(info["title"])
 
         fig.canvas.draw()
         plt.pause(0.001)  # A short pause to process GUI events
@@ -148,44 +159,86 @@ class Viz:
     def visualize(self, complete):
         depiction = complete["map"].copy()
         if complete["robot_state"]["grasping"]:
-            depiction[complete["robot_state"]["position"][0], complete["robot_state"]["position"][1]] = 2
+            depiction[int(complete["robot_state"]["position"][0]), int(complete["robot_state"]["position"][1])] = 2
         else:
-            depiction[complete["robot_state"]["position"][0], complete["robot_state"]["position"][1]] = 3
-        depiction[complete["object_state"]["position"][0], complete["object_state"]["position"][1]] = 4
+            depiction[int(complete["robot_state"]["position"][0]), int(complete["robot_state"]["position"][1])] = 3
+        depiction[int(complete["object_state"]["position"][0]), int(complete["object_state"]["position"][1])] = 4
         print(depiction)
         print("Grasping?:", complete["robot_state"]["grasping"])
         del depiction
     
-    def status(self, reward, i=-1, action=None):
+    def status(self, reward, i=-1, action=None, velocity=None):
         print("Reward:", reward, "\tAction was", action, "\tStep:", i+1)
 
+class ReplayBuffer:
+    def __init__(self):
+        self.episodes = []
+
+    def append(self, episode):
+        self.episodes.append(episode)
+
+class Episode:
+    def __init__(self):
+        self.steps = []
+    
+    def append(self, state, action, reward, next_state):
+        step = Step(state, action, reward, next_state)
+        self.steps.append(step)
+    
+class Step:
+    def __init__(self, state, action, reward, next_state):
+        self.state = state
+        self.action = action
+        self.reward = reward
+        self.next_state = next_state
+
 class Robot:
-    def __init__(self, epsilon = 0.1, with_stops=False):
+    def __init__(self, epsilon = 0.1):
         self.epsilon = epsilon
-        self.actions = {"W":(-1,0), "A":(0,-1), "S":(1,0), "D":(0,1), " ":"G"}
-        if with_stops:
-            self.qtable = defaultdict(lambda : {(1,0):0.0, (-1,0):0.0, (0,1):0.0, (0,-1):0.0, (0,0):0.0, "G":0.0})
-            self.actions["X"] = (0,0)
-        else:
-            self.qtable = defaultdict(lambda : {(1,0):0.0, (-1,0):0.0, (0,1):0.0, (0,-1):0.0, "G":0.0})    
+        self.discretized_actions = {"W":(-0.1,0), "A":(0,-0.1), "S":(0.1,0), "D":(0,0.1), " ":"G"}
+        self.qtable = defaultdict(lambda : {(1,0):0.0, (-1,0):0.0, (0,1):0.0, (0,-1):0.0, "G":0.0})
+        
+        self.action_gaussian_params = [{"mu":0, "sigma":1}, {"mu":0, "sigma":1}]
+        self.action_network = [lambda state : norm.rvs(self.action_gaussian_params[0]["mu"], self.action_gaussian_params[0]["sigma"], 1), lambda state : norm.rvs(self.action_gaussian_params[1]["mu"], self.action_gaussian_params[1]["sigma"], 1)]
+
+        self.replay_buffer = ReplayBuffer() # add Episode to replay_buffer
+#
+#
+#       state (x,y) gives values X with a network
+#       mean and covariance given by network N on inputs X
+#
+#
+#
+#
+    def remember(self, episode):
+        self.replay_buffer.append(episode)
+        
     def policy(self, state, det=False):
+        print("In theory I'd input", state, end=".\n")
         epsilon = self.epsilon
-        if random.random() < epsilon and not det:
-            return random.choice(list(self.actions.values()))
-        else:
-            state = state
-            best_actions = []
-            best_value = -math.inf
-            for action in self.qtable[state].keys():
-                if self.qtable[state][action] > best_value:
-                    best_actions = [action]
-                    best_value = self.qtable[state][action]
-                elif self.qtable[state][action] == best_value:
-                    best_actions.append(action)
-            if len(best_actions) > 1:
-                return random.choice(best_actions)
-            else:
-                return best_actions[0]
+        action = [0.0, 0.0]
+        for component in range(0, len(self.action_network)):
+        
+            action[component] = self.action_network[component](state)[0]
+        return action
+
+def static_sac():
+    s, v, r = Sim(), Viz(), Robot()
+    num_episodes, num_steps = 10, 100
+    for i in range(0, num_episodes):
+        episode = Episode()
+        state = s.state()["my_position"]
+        for step in range(0, num_steps):
+            action = r.policy(state)
+            s.update(action)
+            reward = s.reward()
+            next_state = s.state()["my_position"]
+            episode.append(state, action, reward, next_state)
+            state = next_state
+        r.remember(episode)
+    return r
+
+
 
 #############################################################################################3
 def teleop():
@@ -196,32 +249,34 @@ def teleop():
     print("WASD move <space> to grab.")
     while True:
         # action = policy(state)
-        action = r.actions[input(">>> ").upper()]
+        action = r.discretized_actions[input(">>> ").upper()]
         s.update(action)
         reward = s.reward()
         # state = s.state()
         
-        v.render(s.complete)
-        v.status(reward, 0, action)
+        v.render(s.complete, dict())
+        print(s.complete["robot_state"])
+        v.status(reward, 0, action, s.complete["robot_state"])
         
 def watch_random_policy():
     
     s = Sim()
     v = Viz()
     r = Robot()
-    episode_length = 10
+    episode_length = 100
     episode_end_condition = lambda r: r in [-100, 100] # using reward as signal for episode end conditions
     try:
         while True:
             state = s.state()["my_position"]
             for i in range(0, episode_length):
                 action = r.policy(state)
+                print("sending", action)
                 s.update(action)
                 reward = s.reward()
                 state = s.state()["my_position"]
                 
-                v.visualize(s.complete)
-                v.status(reward, i, action)
+                v.render(s.complete, dict())
+                v.status(reward, 0, action, s.complete["robot_state"])
                 time.sleep(0.25)
                 if episode_end_condition(reward):
                     break
@@ -264,9 +319,9 @@ def watch_robot(r):
         
         
 if __name__ == "__main__":
-    #watch_random_policy()
-    #teleop()
+    static_sac()
+    #teleop() # discrete number of actions
     #r = sample_learn_strict()
-    r = test_learn_strict()
+    #r = test_learn_strict()
 
     

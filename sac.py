@@ -1,174 +1,17 @@
-import numpy as np
-from scipy.stats import mode, norm
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-import random
-from collections import defaultdict
-import time
-import traceback
-import matplotlib.pyplot as plt
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import torch.optim as optim
+
+import torchviz
 from tqdm import tqdm
-import math
-import copy
+import tempfile
 
-class Sim:
 
-    def __init__(self, oml=0.0, robot_position=[7.0,7.0], object_position=[19.0,19.0], map_shape=(20,20)):
-        self.robot_initial_position = robot_position
-        self.object_initial_position = object_position
-        self.map_shape = map_shape
-        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "velocity":[0,0], "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(map_shape)}
-        self.obj_move_likelihood = oml
-        self.mem_reward = None
-        
-    def reset(self):
 
-        #self.complete = {"robot_state":{"position":self.robot_initial_position.copy(), "grasping":False}, "object_state":{"position":self.object_initial_position.copy()}, "map":np.zeros((6,6))}
-        self.complete = {"robot_state":{"position":copy.copy(self.robot_initial_position), "velocity":[0,0], "grasping":False}, "object_state":{"position":copy.copy(self.object_initial_position)}, "map":np.zeros(self.map_shape)}
-#        print("(Reset)", self.complete["robot_state"]["position"])
-    
-    def update(self, action):
-        
-        if action == "G":
-            if self.complete["robot_state"]["grasping"]:
-                self.complete["robot_state"]["grasping"] = False
-            else:
-                self.complete["robot_state"]["grasping"] = True
-            motion = [self.complete["robot_state"]["velocity"][0], self.complete["robot_state"]["velocity"][1]] 
-            self.complete["robot_state"]["position"][0] += motion[0]
-            self.complete["robot_state"]["position"][1] += motion[1]
-        else:
-            self.complete["robot_state"]["velocity"][0] += action[0]
-            self.complete["robot_state"]["velocity"][1] += action[1]
-            motion = [self.complete["robot_state"]["velocity"][0], self.complete["robot_state"]["velocity"][1]]
-            
-        try:
-            if self.complete["robot_state"]["position"][0] + motion[0] < 0 or self.complete["robot_state"]["position"][1] + motion[1] < 0:
-                raise IndexError 
-            self.complete["map"][int(self.complete["robot_state"]["position"][0] + motion[0]), int(self.complete["robot_state"]["position"][1] + motion[1])] = 0
-            self.complete["robot_state"]["position"][0] += motion[0]
-            self.complete["robot_state"]["position"][1] += motion[1]
-            print("Added", motion, "to", self.complete["robot_state"]["position"])
-        except IndexError:
-            self.mem_reward = -100
-            print("Won't move that way!")
-            return
-            pass
-
-        if self.complete["robot_state"]["position"] == [self.complete["object_state"]["position"][0] - 1, self.complete["object_state"]["position"][1]] and action == "G" and self.complete["robot_state"]["grasping"]:
-            self.mem_reward = 100
-        elif self.complete["robot_state"]["position"] == self.complete["object_state"]["position"]:
-            self.mem_reward = -100
-        elif self.complete["robot_state"]["position"] == [self.complete["object_state"]["position"][0] - 1, self.complete["object_state"]["position"][1]] and not action == (1,0):
-            self.mem_reward = -100
-        elif self.complete["robot_state"]["position"][0] == self.complete["map"].shape[0] - 1 and action == "G":
-            self.mem_reward = -100
-        elif self.complete["robot_state"]["position"][0] == self.complete["map"].shape[0] - 1 and action == (1,0) and not self.complete["robot_state"]["grasping"]:
-            self.mem_reward = -100
-        else:
-            self.mem_reward = -1
-        
-
-    def reward(self):
-        return self.mem_reward
-        
-        
-    def state(self):
-        if not self.mem_reward == 100:
-            if random.random() < self.obj_move_likelihood:
-                obj_action = random.choice([-1,1])
-                if self.complete["object_state"]["position"][1] + obj_action >= 0 and self.complete["object_state"]["position"][1] + obj_action < self.complete["map"].shape[1]:
-                    self.complete["object_state"]["position"][1] += obj_action
-        return {"my_position":tuple(self.complete["robot_state"]["position"]), "goal_position":tuple(self.complete["object_state"]["position"])}
-
-class Viz:
-    def __init__(self):
-        plt.ion()
-        self.fig, self.ax = plt.subplots()
-        self.fig.patch.set_facecolor("white")  # Set overall figure background to white
-        plt.show(block=False)
-        time.sleep(3)
-        self.bottom_note = None
-        plt.rcParams['font.family'] = 'Ubuntu'
-        
-    def render(self, complete, info):
-        fig, ax = self.fig, self.ax
-        ax.clear()
-        
-        if self.bottom_note:
-            self.bottom_note.remove()
-        
-        g_img = plt.imread("robot_g.png")  # image for cell value 3 (small image)
-        not_g_img = plt.imread("robot_notg.png")  # slightly different image for cell value 2
-        object_img = plt.imread("object.png")   # image for cell value 4 (e.g. block)
-        
-        zoom = 3 / max(complete["map"].shape)
-        ax.imshow(complete["map"], cmap='gray', interpolation='none')
-        
-         # Get matrix dimensions
-        num_rows, num_cols = complete["map"].shape
-
-        # Set ticks to match each cell
-        ax.set_xticks(np.arange(num_cols))
-        ax.set_yticks(np.arange(num_rows))
-        ax.set_xticklabels(np.arange(num_cols))
-        ax.set_yticklabels(np.arange(num_rows))
-        
-        # Optionally, add minor ticks and grid lines to separate cells clearly
-        ax.set_xticks(np.arange(-0.5, num_cols, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, num_rows, 1), minor=True)
-        ax.grid(which='minor', color='black', linestyle='-', linewidth=1)
-
-        # Determine the robot's position.
-        # Here we assume complete["robot_state"]["position"] is [row, col]
-        robot_row = int(complete["robot_state"]["position"][0])
-        robot_col = int(complete["robot_state"]["position"][1])
-        
-        # Choose the image based on whether the robot is grasping.
-        if complete["robot_state"]["grasping"]:
-            robot_img = g_img
-        else:
-            robot_img = not_g_img
-
-        # Create an image box for the robot.
-        # Coordinates for AnnotationBbox: (x, y) where x is the column and y is the row.
-        robot_box = OffsetImage(robot_img, zoom=zoom)
-        ab_robot = AnnotationBbox(robot_box, (robot_col, robot_row), frameon=False)
-        ax.add_artist(ab_robot)
-        
-        # Determine the object's position
-        object_row = int(complete["object_state"]["position"][0])
-        object_col = int(complete["object_state"]["position"][1])
-        
-        # Create an image box for the object.
-        object_box = OffsetImage(object_img, zoom=zoom)
-        ab_object = AnnotationBbox(object_box, (object_col, object_row), frameon=False)
-        ax.add_artist(ab_object)
-        
-        if len(info.keys()) > 1:
-            if "termination" in info.keys():
-                print(info["reward"])
-                ax.annotate("Terminated with " + str(info["reward"]), xy=(info["termination"][1], info["termination"][0]), xytext=(np.pi/2 + 1, 0.5), arrowprops=dict(color='green', arrowstyle="->"), color='green', zorder=10)
-            self.bottom_note = plt.figtext(0.5, 0.01, "Object movement likelihood: " + str(info["param"]), ha="center", fontsize=12, color='blue')
-            plt.title(info["title"])
-
-        fig.canvas.draw()
-        plt.pause(0.001)  # A short pause to process GUI events
-
-    
-    def visualize(self, complete):
-        depiction = complete["map"].copy()
-        if complete["robot_state"]["grasping"]:
-            depiction[int(complete["robot_state"]["position"][0]), int(complete["robot_state"]["position"][1])] = 2
-        else:
-            depiction[int(complete["robot_state"]["position"][0]), int(complete["robot_state"]["position"][1])] = 3
-        depiction[int(complete["object_state"]["position"][0]), int(complete["object_state"]["position"][1])] = 4
-        print(depiction)
-        print("Grasping?:", complete["robot_state"]["grasping"])
-        del depiction
-    
-    def status(self, reward, i=-1, action=None, velocity=None):
-        print("Reward:", reward, "\tAction was", action, "\tStep:", i+1)
+import os
+import random
 
 class ReplayBuffer:
     def __init__(self):
@@ -176,6 +19,24 @@ class ReplayBuffer:
 
     def append(self, episode):
         self.episodes.append(episode)
+        
+    def sample_batch(self, batch_size):
+        # First, flatten all episodes into a list of steps
+        all_steps = []
+        for episode in self.episodes:
+            all_steps.extend(episode.steps)
+        
+        # Randomly sample transitions from all_steps
+        batch_steps = random.sample(all_steps, batch_size)
+        
+        # Build the batch dictionary
+        batch = {
+            "states": torch.stack([torch.tensor(step.state, dtype=torch.float32) for step in batch_steps]),
+            "actions": torch.stack([torch.tensor(step.action, dtype=torch.float32) for step in batch_steps]),
+            "rewards": torch.stack([torch.tensor(step.reward, dtype=torch.float32) for step in batch_steps]),
+            "next_states": torch.stack([torch.tensor(step.next_state, dtype=torch.float32) for step in batch_steps])
+        }
+        return batch
 
 class Episode:
     def __init__(self):
@@ -192,136 +53,194 @@ class Step:
         self.reward = reward
         self.next_state = next_state
 
-class Robot:
-    def __init__(self, epsilon = 0.1):
-        self.epsilon = epsilon
-        self.discretized_actions = {"W":(-0.1,0), "A":(0,-0.1), "S":(0.1,0), "D":(0,0.1), " ":"G"}
-        self.qtable = defaultdict(lambda : {(1,0):0.0, (-1,0):0.0, (0,1):0.0, (0,-1):0.0, "G":0.0})
+class QNetwork(nn.Module):
+    def __init__(self, state_action_dim=6, q_value_dim=1, hidden_dim=256):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_action_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         
-        self.action_gaussian_params = [{"mu":0, "sigma":1}, {"mu":0, "sigma":1}]
-        self.action_network = [lambda state : norm.rvs(self.action_gaussian_params[0]["mu"], self.action_gaussian_params[0]["sigma"], 1), lambda state : norm.rvs(self.action_gaussian_params[1]["mu"], self.action_gaussian_params[1]["sigma"], 1)]
-
-        self.replay_buffer = ReplayBuffer() # add Episode to replay_buffer
-#
-#
-#       state (x,y) gives values X with a network
-#       mean and covariance given by network N on inputs X
-#
-#
-#
-#
-    def remember(self, episode):
-        self.replay_buffer.append(episode)
+        self.q_value_layer = nn.Linear(hidden_dim, q_value_dim)
         
-    def policy(self, state, det=False):
-        print("In theory I'd input", state, end=".\n")
-        epsilon = self.epsilon
-        action = [0.0, 0.0]
-        for component in range(0, len(self.action_network)):
+    def forward(self, state_action):
+        x = F.relu(self.fc1(state_action))
         
-            action[component] = self.action_network[component](state)[0]
-        return action
-
-def static_sac():
-    s, v, r = Sim(), Viz(), Robot()
-    num_episodes, num_steps = 10, 100
-    for i in range(0, num_episodes):
-        episode = Episode()
-        state = s.state()["my_position"]
-        for step in range(0, num_steps):
-            action = r.policy(state)
-            s.update(action)
-            reward = s.reward()
-            next_state = s.state()["my_position"]
-            episode.append(state, action, reward, next_state)
-            state = next_state
-        r.remember(episode)
-    return r
-
-
-
-#############################################################################################3
-def teleop():
-    s = Sim()
-    v = Viz()
-    r = Robot()
-    # state = s.state()
-    print("WASD move <space> to grab.")
-    while True:
-        # action = policy(state)
-        action = r.discretized_actions[input(">>> ").upper()]
-        s.update(action)
-        reward = s.reward()
-        # state = s.state()
+        x = F.relu(self.fc2(x))
         
-        v.render(s.complete, dict())
-        print(s.complete["robot_state"])
-        v.status(reward, 0, action, s.complete["robot_state"])
+        q_value = self.q_value_layer(x)
         
-def watch_random_policy():
+        return q_value
+        
+    def qvalue(self, state_action):
+        q_value = self.forward(state_action)
+        return q_value
+
+class PolicyNetwork(nn.Module):
+    def __init__(self, state_dim=4, action_dim=2, hidden_dim=256):
+        super(PolicyNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.mean_layer = nn.Linear(hidden_dim, action_dim)
+        
+        self.log_std_layer = nn.Linear(hidden_dim, action_dim)
     
-    s = Sim()
-    v = Viz()
-    r = Robot()
-    episode_length = 100
-    episode_end_condition = lambda r: r in [-100, 100] # using reward as signal for episode end conditions
-    try:
-        while True:
-            state = s.state()["my_position"]
-            for i in range(0, episode_length):
-                action = r.policy(state)
-                print("sending", action)
-                s.update(action)
-                reward = s.reward()
-                state = s.state()["my_position"]
+    def forward(self, state):
+        x = F.relu(self.fc1(state))
+
+        x = F.relu(self.fc2(x))
+
+        mean = self.mean_layer(x)
+
+        log_std = self.log_std_layer(x)
+        log_std = torch.clamp(log_std, min=-20, max=2)
+        std = torch.exp(log_std)
+        return mean, std
+
+    def sample(self, state):
+        mean, std = self.forward(state)
+        
+        normal = torch.distributions.Normal(mean, std)
+        action = normal.rsample()
+        
+        print("Mean:", mean, "\nStd:", std, "\nAction:", action)
+        log_prob = normal.log_prob(action).sum(dim=-1, keepdim=True)
+        squashed_action = torch.tanh(action)
+        return squashed_action, log_prob
+
+
+
+
+#       Control Scripts       #
+
+
+trained_policy = None
+
+def train(sim):
+    
+    policy = PolicyNetwork()
+    qnetwork = QNetwork()
+    rb = ReplayBuffer()
+    
+    policy_optimizer = optim.Adam(policy.parameters(), lr=3e-4)
+    q_optimizer = optim.Adam(qnetwork.parameters(), lr=3e-4)
+    
+    state = sim.observe()
+
+    num_iterations, num_action_episodes, len_episode = 100, 10, 20
+    gamma, alpha = 0.99, 0.2
+    for iteration in tqdm(range(0, num_iterations), position=0):
+        for action_episode in tqdm(range(0, num_action_episodes), position=1, leave=False):
+            e = Episode()
+            for episode in range(0, len_episode):
+                action = policy.sample(state)[0].detach().numpy()
+                sim.act(action)
+                reward = sim.reward()
+                next_state = sim.observe()
+                e.append(state, action, reward, next_state)
+                state = next_state
+            sim.reset()
+            rb.append(e)
+        
+        gradient_steps = 10
+        for gradient_step in tqdm(range(0, gradient_steps), position=1, leave=False):
+            batch = rb.sample_batch(2)
+            states = batch['states']
+            actions = batch['actions']
+            rewards = batch['rewards']
+            next_states = batch['next_states']
+            # Critic update #
+            state_actions = torch.cat((states, actions), dim=-1)
+            q_current = qnetwork(state_actions)
+            
+            with torch.no_grad():
+                next_actions, next_log_probs = policy.sample(next_states)
+                next_state_actions = torch.cat((next_states, next_actions), dim=-1)
+                q_next = qnetwork(next_state_actions)
+                target_q = rewards + gamma * (q_next - alpha * next_log_probs)
                 
-                v.render(s.complete, dict())
-                v.status(reward, 0, action, s.complete["robot_state"])
-                time.sleep(0.25)
-                if episode_end_condition(reward):
-                    break
-                   
-            time.sleep(1)
-            s.reset()
-
-    except KeyboardInterrupt:
-        print("Exiting.")
-
-
-             
-def watch_robot(r):
+            q_loss = F.mse_loss(q_current, target_q)
+            
+            # Actor update #
+            new_actions, log_probs = policy.sample(states)  
+            new_state_actions = torch.cat((states, new_actions), dim=-1)
+            q_val_new = qnetwork(new_state_actions)
+            policy_loss = (alpha * log_probs - q_val_new).mean()
+            
+            # Backpropogation #
+            policy_optimizer.zero_grad()
+            q_optimizer.zero_grad()    
+            
+            policy_loss.backward(retain_graph=True)  # retain_graph to use the graph further
+            q_loss.backward()  
+            
+            policy_optimizer.step()
+            q_optimizer.step()  
+            
+    global trained_policy
+    trained_policy = policy
+    safe_save_model(trained_policy, "trained_policy.pt", save_state_dict=True)
     
-    s = Sim(1.0)
-    v = Viz()
-    episode_length = 1000
-    episode_end_condition = lambda r: r in [-100, 100] # using reward as signal for episode end conditions
-    try:
-        while True:
-            state = s.state()["my_position"]
-            for i in range(0, episode_length):
-                action = r.policy(state, det=True)
-                print("pi(",state,") =", action) 
-                s.update(action)
-                reward = s.reward()
-                state = s.state()["my_position"]
-                
-                v.render(s.complete)
-                v.status(reward, i, action)
-                time.sleep(0.25)
-                if episode_end_condition(reward):
-                    break
-                   
-            time.sleep(1)
-            s.reset()
+def test(sim):
+    import time
+    sim.has_renderer = True
+    sim.reset()
+    global trained_policy
+    state = sim.observe()
+    num_steps = 100
+    for step in range(0, num_steps):
+        print(state)
+        action = trained_policy.sample(state)[0].detach().numpy()
+        print(action)        
+        sim.act(action) 
+        state = sim.observe()
+        print(sim.reward)
+        time.sleep(1)
+              
+       
+def test_single_SAR(sim):
+    policy = PolicyNetwork()
 
-    except KeyboardInterrupt:
-        print("Exiting.")
-        
-        
-if __name__ == "__main__":
-    static_sac()
-    #teleop() # discrete number of actions
-    #r = sample_learn_strict()
-    #r = test_learn_strict()
-
+    state = sim.observe()
     
+    # create tensor out of human-readable "state"
+    state = torch.tensor(state)
+    
+    action, log_prob = policy.sample(state)
+
+def load_saved_model(model_path):
+    global trained_policy
+    trained_policy = PolicyNetwork()
+    trained_policy.load_state_dict(torch.load(model_path))
+    trained_policy.eval()  
+
+def safe_save_model(model, filename, save_state_dict=True):
+    """
+    Safely save a PyTorch model or its state_dict to a file using an atomic write.
+    
+    Parameters:
+        model (torch.nn.Module): The model to save.
+        filename (str): The target filename where the model will be saved.
+        save_state_dict (bool): If True, only the model's state_dict will be saved.
+                                Otherwise, the entire model is saved.
+    """
+    # Choose the data to save
+    data_to_save = model.state_dict() if save_state_dict else model
+
+    # Get the target directory from filename
+    target_dir = os.path.dirname(os.path.abspath(filename))
+    
+    # Ensure the target directory exists
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Use a temporary file in the same directory for atomic write.
+    with tempfile.NamedTemporaryFile(dir=target_dir, delete=False) as tmp_file:
+        temp_filename = tmp_file.name
+        torch.save(data_to_save, tmp_file)
+    
+    # Atomically replace the target file with the temporary file.
+    os.replace(temp_filename, filename)
+    print(f"Model successfully saved to {filename}")    
+    
+
+  
+
